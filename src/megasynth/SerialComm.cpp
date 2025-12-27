@@ -1,45 +1,40 @@
-#ifndef SERIALCOMM_HPP
-#define SERIALCOMM_HPP
+#include "SerialComm.hpp"
 
-#include <avr/io.h> // Include AVR I/O definitions
+#include <avr/io.h>
 
-// Configure the UART for:
-// 9600 baud rate, 8 data bits, 1 stop bit, no parity.
-void setupSerialComm() {
-  // Set baud rate to 9600
-  // For 16MHz clock and 9600 baud, UBRR value is 103
-  //  (calculated as (F_CPU / 16 / BAUD) - 1)
-  UBRR0H = (unsigned char)(103 >> 8);
-  UBRR0L = (unsigned char)103;
-
-  // Enable transmitter (TXEN0) and receiver (RXEN0)
-  UCSR0B = (1 << RXEN0) | (1 << TXEN0);
-
-  // Set frame format: 8 data bits, 1 stop bit, no parity
-  UCSR0C = (3 << UCSZ00); // 8 data bits (UCSZ00 and UCSZ01 set)
-}
-
-// Write a single character.
-void uartWriteChar(unsigned char data) {
-  // Wait for empty transmit buffer
-  while (!(UCSR0A & (1 << UDRE0)));
-
-  // Put data into buffer, sends the data
-  UDR0 = data;
-
-  // Wait for transmission complete (optional)
-  while (!(UCSR0A & (1 << TXC0)));
-  UCSR0A |= (1 << TXC0); // Clear TXC flag
-}
-
-// Write several characters (string)
-// and new line at the end.
-void uartWriteString(const char *s) {
-  while (*s) {
-    uartWriteChar(*s++);
-  }
-  uartWriteChar('\n');
-}
-
-
+#ifndef F_CPU
+#define F_CPU 16000000UL
 #endif
+
+#ifndef UART_BAUD
+#define UART_BAUD 9600UL
+#endif
+
+static uint16_t computeUbr0() {
+  // UBRR = round(F_CPU / (16*BAUD)) - 1
+  const uint32_t denom = 16UL * (uint32_t)UART_BAUD;
+  return (uint16_t)((F_CPU + (denom / 2)) / denom - 1UL);
+}
+
+void setupSerialComm() {
+  const uint16_t ubrr = computeUbr0();
+  UBRR0H = (uint8_t)(ubrr >> 8);
+  UBRR0L = (uint8_t)ubrr;
+
+  // 8N1
+  UCSR0A = 0;
+  UCSR0B = _BV(RXEN0) | _BV(TXEN0);
+  UCSR0C = _BV(UCSZ01) | _BV(UCSZ00);
+}
+
+void uartWriteChar(uint8_t data) {
+  while (!(UCSR0A & _BV(UDRE0))) {
+    // wait for empty transmit buffer
+  }
+  UDR0 = data;
+}
+
+void uartWriteString(const char* s) {
+  while (*s) uartWriteChar((uint8_t)*s++);
+  uartWriteChar((uint8_t)'\n');
+}

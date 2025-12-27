@@ -1,5 +1,4 @@
-#ifndef TONEGENERATOR_HPP
-#define TONEGENERATOR_HPP
+#include "ToneGenerator.hpp"
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
@@ -9,170 +8,166 @@
 #define F_CPU 16000000UL
 #endif
 
+namespace {
 
-static const uint16_t PWM_TOP = 511; // 16MHz/(1*(511+1)) = 31250 Hz
-static const uint32_t SAMPLE_RATE = (F_CPU / (PWM_TOP + 1));
+constexpr uint16_t kPwmTop = 511;  // 16MHz / (1*(511+1)) = 31250 Hz
+constexpr uint32_t kSampleRate = (F_CPU / (uint32_t)(kPwmTop + 1));
 
-static const uint8_t MAX_VOICES = 4; // polyphony level
-static const int16_t AMP_PER_VOICE = (int16_t)((PWM_TOP / 2) / MAX_VOICES);
+constexpr uint8_t kMaxVoices = 4;  // polyphony level
+constexpr int16_t kAmpPerVoice = (int16_t)((kPwmTop / 2) / kMaxVoices);
 
 struct Voice {
-  volatile uint8_t active; // 0/1
-  volatile uint32_t phase; // DDS phase accumulator
-  volatile uint32_t phaseInc; // DDS increment
-  char key; // which key owns this voice
-  uint16_t baseFreq; // un-multiplied frequency (for multiplier changes)
-  uint32_t age;  // for voice stealing (bigger = newer)
+  volatile uint8_t active;   // 0/1
+  volatile uint32_t phase;   // DDS phase accumulator
+  volatile uint32_t phaseInc;  // DDS increment
+  char key;                  // which key owns this voice
+  uint16_t baseFreq;         // un-multiplied frequency
+  uint32_t age;              // for voice stealing (bigger -> newer)
 };
 
-static volatile uint16_t pwmMid = PWM_TOP / 2;
-static volatile uint32_t gAgeCounter = 0;
-static volatile uint16_t gFreqMultiplier = 1;
-static Voice voices[MAX_VOICES];
+volatile uint16_t s_pwmMid = kPwmTop / 2;
+volatile uint32_t s_ageCounter = 0;
+volatile uint16_t s_freqMultiplier = 1;
 
-static inline uint32_t calcPhaseInc(uint32_t freqHz) {
-  // phaseInc = freq * 2^32 / sampleRate
-  // use 64-bit to preserve precision
-  uint64_t num = ((uint64_t)freqHz << 32);
-  return (uint32_t)(num / (uint64_t)SAMPLE_RATE);
+Voice s_voices[kMaxVoices];
+
+inline uint32_t calcPhaseInc(uint32_t freqHz) {
+  // phaseInc = freq * 2^32 / sampleRate (use 64-bit to preserve precision)
+  const uint64_t num = ((uint64_t)freqHz << 32);
+  return (uint32_t)(num / (uint64_t)kSampleRate);
 }
 
-static int8_t findVoiceByKey(char key) {
-  for (uint8_t i = 0; i < MAX_VOICES; i++) {
-    if (voices[i].active && voices[i].key == key) return (int8_t)i;
+int8_t findVoiceByKey(char key) {
+  for (uint8_t i = 0; i < kMaxVoices; i++) {
+    if (s_voices[i].active && s_voices[i].key == key) return (int8_t)i;
   }
   return -1;
 }
 
-static uint8_t findFreeOrStealVoice() {
+uint8_t findFreeOrStealVoice() {
   // Prefer inactive
-  for (uint8_t i = 0; i < MAX_VOICES; i++) {
-    if (!voices[i].active) return i;
+  for (uint8_t i = 0; i < kMaxVoices; i++) {
+    if (!s_voices[i].active) return i;
   }
   // Steal oldest (smallest age)
   uint8_t victim = 0;
-  uint32_t bestAge = voices[0].age;
-  for (uint8_t i = 1; i < MAX_VOICES; i++) {
-    if (voices[i].age < bestAge) {
-      bestAge = voices[i].age;
+  uint32_t bestAge = s_voices[0].age;
+  for (uint8_t i = 1; i < kMaxVoices; i++) {
+    if (s_voices[i].age < bestAge) {
+      bestAge = s_voices[i].age;
       victim = i;
     }
   }
   return victim;
 }
 
+}  // namespace
+
 void setupToneGenerator() {
-  // OC1C output: PB7 (Arduino D13)
-  DDRB |= (1 << PB7);
+  // OC1C output: PB7 (Arduino Mega D13)
+  DDRB |= _BV(PB7);
 
   // Clear voices
-  for (uint8_t i = 0; i < MAX_VOICES; i++) {
-    voices[i].active = 0;
-    voices[i].phase = 0;
-    voices[i].phaseInc = 0;
-    voices[i].key = 0;
-    voices[i].baseFreq = 0;
-    voices[i].age = 0;
+  for (uint8_t i = 0; i < kMaxVoices; i++) {
+    s_voices[i].active = 0;
+    s_voices[i].phase = 0;
+    s_voices[i].phaseInc = 0;
+    s_voices[i].key = 0;
+    s_voices[i].baseFreq = 0;
+    s_voices[i].age = 0;
   }
 
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    // Timer1 Fast PWM, TOP=ICR1 (Mode 14: WGM13:0 = 1110)
+    // Timer1 Fast PWM, TOP = ICR1 (Mode 14: WGM13:0 = 1110)
     TCCR1A = 0;
     TCCR1B = 0;
 
     // Non-inverting PWM on OC1C (COM1C1=1)
-    TCCR1A |= (1 << COM1C1);
+    TCCR1A |= _BV(COM1C1);
 
     // WGM bits
-    TCCR1A |= (1 << WGM11);
-    TCCR1B |= (1 << WGM13) | (1 << WGM12);
+    TCCR1A |= _BV(WGM11);
+    TCCR1B |= _BV(WGM13) | _BV(WGM12);
 
-    // TOP
-    ICR1 = PWM_TOP;
-
-    // Start at mid (silence)
-    OCR1C = pwmMid;
+    // TOP and initial duty (silence)
+    ICR1 = kPwmTop;
+    OCR1C = s_pwmMid;
 
     // Enable overflow interrupt (fires at PWM rate)
-    TIMSK1 |= (1 << TOIE1);
+    TIMSK1 |= _BV(TOIE1);
 
     // Prescaler = 1 (CS10=1)
-    TCCR1B |= (1 << CS10);
+    TCCR1B |= _BV(CS10);
   }
 }
 
-void toneSetFreqMultiplier(unsigned int mult) {
+void toneSetFreqMultiplier(uint16_t mult) {
   if (mult == 0) mult = 1;
-  if (mult > 16) mult = 16; // safety clamp
+  if (mult > 16) mult = 16;  // safety
 
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    gFreqMultiplier = (uint16_t)mult;
-    // Update all active voices
-    for (uint8_t i = 0; i < MAX_VOICES; i++) {
-      if (voices[i].active) {
-        uint32_t f = (uint32_t)voices[i].baseFreq * (uint32_t)gFreqMultiplier;
-        voices[i].phaseInc = calcPhaseInc(f);
+    s_freqMultiplier = mult;
+    for (uint8_t i = 0; i < kMaxVoices; i++) {
+      if (s_voices[i].active) {
+        const uint32_t f = (uint32_t)s_voices[i].baseFreq * (uint32_t)s_freqMultiplier;
+        s_voices[i].phaseInc = calcPhaseInc(f);
       }
     }
   }
 }
 
-void toneNoteOn(char key, unsigned int baseFrequency) {
+void toneNoteOn(char key, uint16_t baseFrequency) {
   if (baseFrequency == 0) return;
 
-  // If already active, just refresh (recompute inc/age)
-  int8_t existing = findVoiceByKey(key);
-  uint8_t idx = (existing >= 0) ? (uint8_t)existing : findFreeOrStealVoice();
+  const int8_t existing = findVoiceByKey(key);
+  const uint8_t idx = (existing >= 0) ? (uint8_t)existing : findFreeOrStealVoice();
 
-  uint32_t f = (uint32_t)baseFrequency * (uint32_t)gFreqMultiplier;
-  uint32_t inc = calcPhaseInc(f);
+  const uint32_t f = (uint32_t)baseFrequency * (uint32_t)s_freqMultiplier;
+  const uint32_t inc = calcPhaseInc(f);
 
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    voices[idx].active = 0;      // prevent ISR reading half-written values
-    voices[idx].key = key;
-    voices[idx].baseFreq = (uint16_t)baseFrequency;
-    voices[idx].phase = 0;
-    voices[idx].phaseInc = inc;
-    voices[idx].age = ++gAgeCounter;
-    voices[idx].active = 1;
+    // Prevent ISR from reading half-written values
+    s_voices[idx].active = 0;
+    s_voices[idx].key = key;
+    s_voices[idx].baseFreq = baseFrequency;
+    s_voices[idx].phase = 0;
+    s_voices[idx].phaseInc = inc;
+    s_voices[idx].age = s_ageCounter++;
+    s_voices[idx].active = 1;
   }
 }
 
 void toneNoteOff(char key) {
-  int8_t idx = findVoiceByKey(key);
+  const int8_t idx = findVoiceByKey(key);
   if (idx < 0) return;
 
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    voices[(uint8_t)idx].active = 0;
-  }
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { s_voices[(uint8_t)idx].active = 0; }
 }
 
 void toneAllOff() {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    for (uint8_t i = 0; i < MAX_VOICES; i++) voices[i].active = 0;
-    OCR1C = pwmMid;
+    for (uint8_t i = 0; i < kMaxVoices; i++) s_voices[i].active = 0;
+    OCR1C = s_pwmMid;
   }
 }
 
-// Audio ISR: runs at SAMPLE_RATE (~31.25kHz)
+// Audio ISR runs at kSampleRate (about 31.25 kHz)
 ISR(TIMER1_OVF_vect) {
   int16_t mix = 0;
 
-  for (uint8_t i = 0; i < MAX_VOICES; i++) {
-    if (voices[i].active) {
-      uint32_t p = voices[i].phase + voices[i].phaseInc;
-      voices[i].phase = p;
+  for (uint8_t i = 0; i < kMaxVoices; i++) {
+    if (s_voices[i].active) {
+      const uint32_t p = s_voices[i].phase + s_voices[i].phaseInc;
+      s_voices[i].phase = p;
 
-      // square wave from MSB of phase
-      mix += (p & 0x80000000UL) ? AMP_PER_VOICE : -AMP_PER_VOICE;
+      // Square wave from MSB of phase
+      mix += (p & 0x80000000UL) ? kAmpPerVoice : -kAmpPerVoice;
     }
   }
 
-  int32_t duty = (int32_t)pwmMid + (int32_t)mix;
+  int32_t duty = (int32_t)s_pwmMid + (int32_t)mix;
   if (duty < 0) duty = 0;
-  if (duty > PWM_TOP) duty = PWM_TOP;
+  if (duty > kPwmTop) duty = kPwmTop;
 
   OCR1C = (uint16_t)duty;
 }
-
-#endif

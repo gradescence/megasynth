@@ -1,101 +1,56 @@
-#ifndef TIME_HPP
-#define TIME_HPP
+#include "Time.hpp"
 
-#include "Arduino.h"
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <util/atomic.h>
 
-/*
-* This library implements thw folowing time resources:
-* Function to ger number milliseconds since initialization. Non-blocking call.
-* Function to delay execition for a given number of milliseconds. Blocking call.
-* It uses Timer 2 to support get elapsed milliseconds.
-* It uses Timer 3 to support sleep a number of milliseconds.
-*/
+#ifndef F_CPU
+#define F_CPU 16000000UL
+#endif
 
-volatile unsigned long elapsetMilliseconds = 0; // Global variable to track milliseconds since setup.
-volatile unsigned long delayMillisecondsCount = 0; // Global variable to track delay millisecodsn.
-
-// Function to initialize Timers used by 
-// It uses Timer 2 to support getElapsedMilliseconds()
-// It uses Timer 3 to support sleepMilliseconds()
-void setupTime() {
-  /*
-  * Configure Timer2 for 1ms interrupt
-  * Timer 2 supports getElapsedMilliseconds()
-  */
-  noInterrupts(); // Disable interrupts during setup
-  TCCR2A = 0;    // Clear TCCR1A register
-  TCCR2B = 0;    // Clear TCCR1B register
-  TCNT2 = 0;     // Initialize counter value to 0
-
-  // Set CTC mode (Clear Timer on Compare Match)
-  // WGM12 bit in TCCR1B for CTC mode
-  TCCR2B |= (1 << WGM12);
-
-  // Set prescaler to 64 (for 16MHz clock, 16,000,000 / 64 = 250,000 Hz)
-  // CS11 and CS10 bits in TCCR1B for prescaler of 64
-  TCCR2B |= (1 << CS11) | (1 << CS10);
-
-  // Set compare match register for 1ms interrupt
-  // (250,000 Hz / 1000 Hz = 250 counts per millisecond)
-  OCR2A = 249; // Count from 0 to 249 (250 counts)
-
-  // Enable Timer Compare Interrupt A
-  TIMSK2 |= (1 << OCIE1A);
-
-  /*
-   * Configure Timer3 for a 1-millisecond interrupt.
-   * This timer spports sleepMillisecods()
-   */
-
-  TCCR3A = 0;
-  TCCR3B = 0;
-  TCNT3 = 0; // Reset timer count
-  // Set compare match register for 1ms interrupt
-  // (250,000 Hz / 1000 Hz = 250 counts per millisecond)
-  OCR3A = 249; // Count from 0 to 249 (250 counts)
-  TCCR3B |= (1 << WGM12); // CTC mode
-  TCCR3B |= (1 << CS11) | (1 << CS10); // Prescaler 64
-  TIMSK3 |= (1 << OCIE1A); // Enable Timer1 Compare Match A Interrupt
-
-  interrupts(); // enable interrupts
+namespace {
+volatile unsigned long s_elapsedMs = 0;
 }
 
-// Interrupt Service Routine for Timer2 Compare Match A
+// Timer2 Compare Match A -> 1ms tick
 ISR(TIMER2_COMPA_vect) {
-  // One milliseconds elapsed, increment the milliseconds counter.
-  elapsetMilliseconds++;
+  s_elapsedMs++;
 }
 
-// Interrupt Service Routine for Timer3 Compare Match A
-ISR(TIMER3_COMPA_vect) {
-  delayMillisecondsCount++; // Increment counter every milliecond.
-}
+void setupTime() {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    // Stop timer
+    TCCR2A = 0;
+    TCCR2B = 0;
+    TCNT2  = 0;
 
-// Function to get milliseconds since initialization.
-// It supported by Timer 2.
-unsigned long getElapsedMillis() {
-  unsigned long currentMillis;
-  // Disable interupts to prevent conflict with ISR when accesing elapsetMilliseconds.
-  noInterrupts(); 
-  currentMillis = elapsetMilliseconds;
-  // Re-enable interupts.
+    // CTC mode (TOP = OCR2A)
+    TCCR2A |= _BV(WGM21);
+
+    // Prescaler 64 -> 16MHz / 64 = 250kHz
+    // 250kHz / 1000Hz = 250 counts -> OCR2A = 249
+    TCCR2B |= _BV(CS22);  // /64
+
+    OCR2A = 249;
+
+    TIMSK2 |= _BV(OCIE2A);
+
+    s_elapsedMs = 0;
+  }
+
+  // ensure global interrupts enabled
   interrupts();
-  return currentMillis;
 }
 
-// Function to delay current execution for the given millisecods.
-// It is supported by Timer 3
+unsigned long getElapsedMillis() {
+  unsigned long ms;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { ms = s_elapsedMs; }
+  return ms;
+}
+
 void sleepMillis(unsigned long milliseconds) {
-  noInterrupts(); 
-  delayMillisecondsCount = 0;
-  interrupts(); 
-  while(true){
-    if( delayMillisecondsCount >= milliseconds){
-      break;
-    }
+  const unsigned long start = getElapsedMillis();
+  while ((unsigned long)(getElapsedMillis() - start) < milliseconds) {
+    // busy wait; interrupts stay enabled
   }
 }
-
-#endif

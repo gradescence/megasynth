@@ -1,147 +1,113 @@
-//Mikeal Macera --- mmacera@unr.edu
-//Mattia Granata --- mattiag@unr.edu
-//Julian Estorga --- jestorga@unr.edu
-//Cade Evans --- cadee@unr.edu
+/*
+Polyphonic Synthesizer Project for Introduction to Embedded Systems (Comp. Eng. 301)
+mmacera(gradescent)[1][2], cadee[2], mattiag[2], jestorga[2]
+[1]: Carnegie Mellon University
+[2]: University of Nevada-Reno
+*/
 #include "KeyMatrixScanner.hpp"
 #include "ToneGenerator.hpp"
 #include "Time.hpp"
-#include "Melodies.hpp" 
 #include "Button.hpp"
 #include "SerialComm.hpp"
 
-char mmid[13] ={0x4d,0x69,0x6b,0x65,0x61,0x6c,0x20,0x4d,0x61,0x63,0x65,0x72,0x61};
-
-struct Note {
-  char key;
-  int  freq;
-  int  durationMilliseconds;
-} Notes;
-const int NOTES = 25;       
-Note notes[NOTES]{
-  {'A', 262, 100},
-  {'B', 277, 100}, 
-  {'C', 293, 100}, 
-  {'D', 311, 100},   
-  {'E', 329, 100},
-  {'F', 349, 100},
-  {'G', 369, 100},
-  {'H', 392, 100},
-  {'I', 415, 100},
-  {'J', 440, 100},
-  {'O', 466, 100},
-  {'N', 494, 100},
-  {'M', 523, 100},
-  {'L', 554, 100},
-  {'K', 587, 100},
-  {'T', 622, 100},
-  {'S', 659, 100},
-  {'R', 698, 100},
-  {'Q', 740, 100},
-  {'P', 784, 100},
-  {'Y', 831, 100},
-  {'X', 880, 100},
-  {'W', 932, 100},
-  {'V', 988, 100},
-  {'U', 1046, 100}
+// Index mapping corresponds to KeyMatrixScanner's kKeyMap:
+//   A B C D E
+//   F G H I J
+//   K L M N O
+//   P Q R S T
+//   U V W X Y
+static constexpr uint8_t kNumKeys = KEYMATRIX_NUM_KEYS;
+static constexpr uint16_t kFreqByIndex[kNumKeys] = {
+    262, 277, 293, 311, 329,  // A..E
+    349, 369, 392, 415, 440,  // F..J
+    587, 554, 523, 494, 466,  // K..O 
+    784, 740, 698, 659, 622,  // P..T 
+    1046, 988, 932, 880, 831  // U..Y 
 };
 
-int freqForKey(char key) {
-  for (int i = 0; i < NOTES; i++) {
-    if (notes[i].key == key) return notes[i].freq;
-  }
-  return 0;
-}
+// Debounce / state
+static constexpr unsigned long kKeyDebounceMs = 50;      
+static constexpr unsigned long kButtonDebounceMs = 150;  
 
+static uint32_t g_prevRawMask = 0;
+static uint32_t g_stableMask = 0;
+static unsigned long g_lastChangeMs[kNumKeys] = {0};
 
-static const uint8_t NUM_KEYS = 25;
+static unsigned long g_lastButtonMs = 0;
 
-uint32_t lastRawMask = 0;
-uint32_t stableMask  = 0;
-unsigned long lastChangeMs[NUM_KEYS] = {0};
-
-
-int demo_done = false;
-char prevKey;
-long prevKeyMilliseconds = 0;
-long debounceKeyMilliseconds = 100;
-
-long prevPushButtonMilliseconds = 0;
-long debouncePushButtonMilliseconds = 300;
-
-/*
-* The push button will increse by one freqMultiplier. When max is raeched freqMultiplers is set to 1.
-*/
-const int FREQ_MULT_MAX = 6;
-int freqMultiplier = 1;
+// Multiplier (push button cycles) 
+static constexpr uint8_t kFreqMultMax = 6;
+static uint8_t g_freqMultiplier = 1;
 
 void setup() {
   setupSerialComm();
   uartWriteString("Initializing time resources...");
   setupTime();
+
   uartWriteString("Initializing key matrix scanner...");
   setupKeyMatrixScanner();
+
   uartWriteString("Initializing tone generator...");
   setupToneGenerator();
-  toneSetFreqMultiplier(freqMultiplier);
+  toneSetFreqMultiplier(g_freqMultiplier);
+
   setupButton();
 
-  sleepMillis(1000);
+  sleepMillis(250);
   uartWriteString("Initialization completed!");
-  for(int i=0; i<13; i++){
-    //uartWriteChar(mmid[i]);
+}
+
+static void handleKeys(uint32_t rawMask, unsigned long nowMs) {
+  // Update per-key "last change" timestamps for bits that changed since last scan.
+  const uint32_t changes = rawMask ^ g_prevRawMask;
+  if (changes) {
+    for (uint8_t idx = 0; idx < kNumKeys; idx++) {
+      const uint32_t bit = (1UL << idx);
+      if (changes & bit) g_lastChangeMs[idx] = nowMs;
+    }
+    g_prevRawMask = rawMask;
   }
 
+  // commits the raw to stable when it has stayed different long enough
+  for (uint8_t idx = 0; idx < kNumKeys; idx++) {
+    const uint32_t bit = (1UL << idx);
+
+    const bool rawPressed = (rawMask & bit) != 0;
+    const bool stablePressed = (g_stableMask & bit) != 0;
+
+    if (rawPressed == stablePressed) continue;
+    if ((unsigned long)(nowMs - g_lastChangeMs[idx]) < kKeyDebounceMs) continue;
+
+    const char key = keyFromIndex(idx);
+    if (!key) continue;
+
+    if (rawPressed) {
+      g_stableMask |= bit;
+      toneNoteOn(key, kFreqByIndex[idx]);
+    } else {
+      g_stableMask &= ~bit;
+      toneNoteOff(key);
+    }
+  }
+}
+
+static void handleButton(unsigned long nowMs) {
+  if (!isPushButtonPressed()) return;
+
+  if ((unsigned long)(nowMs - g_lastButtonMs) < kButtonDebounceMs) return;
+  g_lastButtonMs = nowMs;
+
+  g_freqMultiplier = (g_freqMultiplier < kFreqMultMax) ? (g_freqMultiplier + 1) : 1;
+  toneSetFreqMultiplier(g_freqMultiplier);
+
+  uartWriteString("Push button pressed (multiplier updated).");
 }
 
 void loop() {
-  unsigned long now = getElapsedMillis();
+  const unsigned long nowMs = getElapsedMillis();
 
-  //Read ALL keys 
-  uint32_t rawMask = scanKeysMask();
+  const uint32_t rawMask = scanKeysMask();
+  handleKeys(rawMask, nowMs);
 
-  // Per-key debounce + generate note on/off events
-  for (uint8_t idx = 0; idx < NUM_KEYS; idx++) {
-    uint32_t bit = (1UL << idx);
-
-    bool rawPressed  = (rawMask & bit) != 0;
-    bool prevRaw     = (lastRawMask & bit) != 0;
-    bool stablePress = (stableMask & bit) != 0;
-
-    // track when raw changed
-    if (rawPressed != prevRaw) {
-      lastChangeMs[idx] = now;
-      if (rawPressed) lastRawMask |= bit;
-      else            lastRawMask &= ~bit;
-    }
-
-    // if raw differs from stable long enough, change
-    if (rawPressed != stablePress) {
-      if ((now - lastChangeMs[idx]) >= (unsigned long)debounceKeyMilliseconds) {
-        char key = keyFromIndex(idx);
-
-        if (rawPressed) {
-          stableMask |= bit;
-          int f = freqForKey(key);
-          if (f > 0) toneNoteOn(key, (unsigned int)f);
-        } else {
-          stableMask &= ~bit;
-          toneNoteOff(key);
-        }
-      }
-    }
-  }
-
-  // Push button (multiplier)
-  if (isPushButtonPressed()) {
-    unsigned long curPushButtonMilliseconds = getElapsedMillis();
-    if (curPushButtonMilliseconds - prevPushButtonMilliseconds > debouncePushButtonMilliseconds) {
-      prevPushButtonMilliseconds = curPushButtonMilliseconds;
-      uartWriteString("Push button pressed! ");
-      freqMultiplier = (freqMultiplier < FREQ_MULT_MAX) ? (freqMultiplier + 1) : 1;
-
-      // update all active voices
-      toneSetFreqMultiplier(freqMultiplier);
-    }
-  }
+  handleButton(nowMs);
 }
-

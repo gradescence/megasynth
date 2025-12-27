@@ -1,149 +1,106 @@
-#ifndef KEYMATRIXSCANNER_HPP
-#define KEYMATRIXSCANNER_HPP
+#include "KeyMatrixScanner.hpp"
 
 #include <avr/io.h>
-#include "Arduino.h"
 
-const int ROWS = 5;
-const int COLS = 5;
+namespace {
 
-int numColumns(){
-  return COLS;
-}
-
-int numRows(){
-  return ROWS;
-}
-
-char keysMap[ROWS][COLS] = {
-  {'A', 'B', 'C', 'D', 'E'},
-  {'F', 'G', 'H', 'I', 'J'},
-  {'K', 'L', 'M', 'N', 'O'},
-  {'P', 'Q', 'R', 'S', 'T'},
-  {'U', 'V', 'W', 'X', 'Y'}
+struct OutPin {
+  volatile uint8_t* ddr;
+  volatile uint8_t* port;
+  uint8_t mask;
 };
 
+struct InPin {
+  volatile uint8_t* ddr;
+  volatile uint8_t* port;
+  volatile uint8_t* pin;
+  uint8_t mask;
+};
+
+// Cols: PA0, PA2, PA4, PA6, PC7 (active LOW while scanning)
+const OutPin kCols[KEYMATRIX_COLS] = {
+    {&DDRA, &PORTA, _BV(PA0)},
+    {&DDRA, &PORTA, _BV(PA2)},
+    {&DDRA, &PORTA, _BV(PA4)},
+    {&DDRA, &PORTA, _BV(PA6)},
+    {&DDRC, &PORTC, _BV(PC7)},
+};
+
+// Rows: PG1, PL7, PL5, PL3, PL1 (inputs with pull-ups)
+const InPin kRows[KEYMATRIX_ROWS] = {
+    {&DDRG, &PORTG, &PING, _BV(PG1)},
+    {&DDRL, &PORTL, &PINL, _BV(PL7)},
+    {&DDRL, &PORTL, &PINL, _BV(PL5)},
+    {&DDRL, &PORTL, &PINL, _BV(PL3)},
+    {&DDRL, &PORTL, &PINL, _BV(PL1)},
+};
+
+const char kKeyMap[KEYMATRIX_ROWS][KEYMATRIX_COLS] = {
+    {'A', 'B', 'C', 'D', 'E'},
+    {'F', 'G', 'H', 'I', 'J'},
+    {'K', 'L', 'M', 'N', 'O'},
+    {'P', 'Q', 'R', 'S', 'T'},
+    {'U', 'V', 'W', 'X', 'Y'},
+};
+
+inline void colHigh(uint8_t col) { *kCols[col].port |= kCols[col].mask; }
+inline void colLow(uint8_t col) { *kCols[col].port &= (uint8_t)~kCols[col].mask; }
+
+inline bool rowPressed(uint8_t row) {
+  // With pull-ups enabled, pressed == LOW (0)
+  return ((*kRows[row].pin & kRows[row].mask) == 0);
+}
+
+}  // namspace
+
 void setupKeyMatrixScanner() {
-  //Set columns as outputs
-  DDRA |= (1 << PA0); // Set PA0 as output
-  PORTA |= (1 << PA0); // Set PA0 HIGH
-  DDRA |= (1 << PA2); // Set PA2 as output
-  PORTA |= (1 << PA2); // Set PA2 HIGH
-  DDRA |= (1 << PA4); // Set PA4 as output
-  PORTA |= (1 << PA4); // Set PA4 HIGH
-  DDRA |= (1 << PA6); // Set PA6 as output
-  PORTA |= (1 << PA6); // Set PA6 HIGH
-  DDRC |= (1 << PC7); // Set PC7 as output
-  PORTC |= (1 << PC7); // Set PC7 HIGH
-
-  //Set rows as inputs (with internal pull up resistor)
-  DDRG &= ~(1 << PG1); //Set PG1 is input
-  PORTG |= (1 << PG1); //Enable internal pull up resistor for PG1
-  DDRL &= ~(1 << PL7); //Set PL7 is input
-  PORTL |= (1 << PL7); //Enable internal pull up resistor for PL7
-  DDRL &= ~(1 << PL5); //Set PL5 is input
-  PORTL |= (1 << PL5); //Enable internal pull up resistor for PL5
-  DDRL &= ~(1 << PL3); //Set PL3 is input
-  PORTL |= (1 << PL3); //Enable internal pull up resistor for PL3
-  DDRL &= ~(1 << PL1); //Set PL1 is input
-  PORTL |= (1 << PL1); //Enable internal pull up resistor for PL1
-}
-
-/*Activate column (write LOW)*/
-void activateColumn(int index){
-  if(index == 0)
-    PORTA &= ~(1 << PA0);
-  else if (index == 1)
-   PORTA &= ~(1 << PA2);
-  else if (index == 2)
-    PORTA &= ~(1 << PA4);
-  else if (index == 3)
-    PORTA &= ~(1 << PA6);
-  else if(index == 4)
-    PORTC &= ~(1 << PC7);
-}
-
-/* Dectivate column (write HIGH)*/
-void deactivateColumn(int index){
-  if(index == 0)
-    PORTA |= (1 << PA0);
-  else if (index == 1)
-   PORTA |= (1 << PA2);
-  else if (index == 2)
-    PORTA |= (1 << PA4);
-  else if (index == 3)
-    PORTA |= (1 << PA6);
-  else if(index == 4)
-     PORTC |= (1 << PC7);
-}
-
-/* Read a row */
-int readRow(int index){
-  if(index == 0)
-    return PING & (1 << PG1);
-  else if (index == 1)
-   return PINL & (1 << PL7);
-  else if (index == 2)
-   return  PINL & (1 << PL5);
-  else if (index == 3)
-   return  PINL & (1 << PL3);
-  else if(index == 4)
-    return PINL & (1 << PL1);
-  return -1;
-}
-
-char scanKey(){
-  int rKey = -1;
-  int cKey = -1;  
-  int c = 0;
-  int r = 0;
-  for(c = 0; c < numColumns(); c++){
-    cKey = c;
-    activateColumn(c);    
-    for(r = 0; r < numRows() ; r++){
-       if(readRow(r) == LOW){
-         rKey = r;
-       }
-    }
-    deactivateColumn(c);
-    if(rKey != -1){
-      break;
-    }
+  // Cols as outputs, idle HIGH
+  for (uint8_t c = 0; c < KEYMATRIX_COLS; c++) {
+    *kCols[c].ddr |= kCols[c].mask;
+    colHigh(c);
   }
 
-  if(rKey != -1 && cKey != -1){
-     //Serial.print(" Row: ");
-     //Serial.print(rKey);
-     //Serial.print(" Col: ");
-     //Serial.println(cKey);
-     return keysMap[rKey][cKey];
+  // Rows as inputs with internal pull-ups
+  for (uint8_t r = 0; r < KEYMATRIX_ROWS; r++) {
+    *kRows[r].ddr &= (uint8_t)~kRows[r].mask;
+    *kRows[r].port |= kRows[r].mask;
   }
-  return 0;
 }
-
 
 uint32_t scanKeysMask() {
   uint32_t mask = 0;
 
-  for (int c = 0; c < numColumns(); c++) {
-    activateColumn(c);
+  for (uint8_t c = 0; c < KEYMATRIX_COLS; c++) {
+    colLow(c);
 
-    for (int r = 0; r < numRows(); r++) {
-      if (readRow(r) == LOW) {
-        uint8_t idx = (uint8_t)(r * COLS + c); // row-major 0..24
+    // Small settling time (a few cycles)
+    asm volatile("nop\n\t" "nop\n\t" "nop\n\t");
+
+    for (uint8_t r = 0; r < KEYMATRIX_ROWS; r++) {
+      if (rowPressed(r)) {
+        const uint8_t idx = (uint8_t)(r * KEYMATRIX_COLS + c);  // 0..24
         mask |= (1UL << idx);
       }
     }
 
-    deactivateColumn(c);
+    colHigh(c);
   }
+
   return mask;
 }
 
 char keyFromIndex(uint8_t idx) {
-  if (idx >= (ROWS * COLS)) return 0;
-  return keysMap[idx / COLS][idx % COLS];
+  if (idx >= KEYMATRIX_NUM_KEYS) return 0;
+  return kKeyMap[idx / KEYMATRIX_COLS][idx % KEYMATRIX_COLS];
 }
 
+char scanKey() {
+  uint32_t mask = scanKeysMask();
+  if (!mask) return 0;
 
-#endif
+  // Return the first key in proper order
+  for (uint8_t idx = 0; idx < KEYMATRIX_NUM_KEYS; idx++) {
+    if (mask & (1UL << idx)) return keyFromIndex(idx);
+  }
+  return 0;
+}
